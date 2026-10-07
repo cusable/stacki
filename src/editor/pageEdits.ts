@@ -156,7 +156,7 @@ export class EditDrafts {
     if (this.#entries.length >= LIMITS.intentsPendingMax) {
       return 'full';
     }
-    owe(record);
+    owe(record, 'enqueued');
     this.#entries.push({ tag: 'gesture', gesture, record, stream });
     return 'queued';
   }
@@ -181,7 +181,7 @@ export class EditDrafts {
     const baseline = code === undefined ? typedBaseline(shown) : code.baseline;
     const kept = records.includes(record) ? records : [...records, record];
     if (!records.includes(record)) {
-      owe(record);
+      owe(record, 'enqueued');
     }
     this.#entries = [{ tag: 'code', baseline, records: kept }];
     assert(this.#entries.length === 1, 'Typing leaves the page one patch to save');
@@ -336,31 +336,15 @@ export function writeOutcome(record: EditsRecord, outcome: EditsOutcome): void {
   record.outcome = outcome;
 }
 
-// The step is owed one more write.
-function owe(record: EditsRecord): void {
-  const outcome = record.outcome;
-  switch (outcome.tag) {
-    case 'pending':
-      writeOutcome(record, { ...outcome, waiting: outcome.waiting + 1 });
-      return;
-    case 'applied':
-      writeOutcome(record, { tag: 'pending', waiting: 1, applied: outcome.applied });
-      return;
-    case 'folded':
-    case 'dropped':
-      writeOutcome(record, { tag: 'pending', waiting: 1, applied: [] });
-      return;
-    default: {
-      const exhaustive: never = outcome;
-      return exhaustive;
-    }
-  }
-}
+// Why a step is owed another write. `enqueued`: its record goes into the queue
+// now, so one folded or dropped since is live again — its own write is coming.
+// `mid-flight`: a later request of a gesture already being sent, so a record the
+// queue has given up (a preview's, typing's, a discard's) stays unread and takes
+// no answer.
+type Owing = 'enqueued' | 'mid-flight';
 
-// One more write of a gesture the step is already waiting on, or has just
-// settled (sendGesture, a later request). A record no step reads — a preview's,
-// dropped — stays dropped: it takes no answers.
-function oweAnother(record: EditsRecord): void {
+// The step is owed one more write.
+function owe(record: EditsRecord, owing: Owing): void {
   const outcome = record.outcome;
   switch (outcome.tag) {
     case 'pending':
@@ -371,6 +355,9 @@ function oweAnother(record: EditsRecord): void {
       return;
     case 'folded':
     case 'dropped':
+      if (owing === 'enqueued') {
+        writeOutcome(record, { tag: 'pending', waiting: 1, applied: [] });
+      }
       return;
     default: {
       const exhaustive: never = outcome;
@@ -462,7 +449,7 @@ export async function sendGesture(input: {
     // imports. Owed right before the request goes out, so one that never
     // goes (a retry stops at the first) is never waited for.
     if (index > 0) {
-      oweAnother(input.record);
+      owe(input.record, 'mid-flight');
     }
     const request = { pagePath: input.path, authoredChecksum: origin.checksum, edit };
     const answer = await input.send(request);
