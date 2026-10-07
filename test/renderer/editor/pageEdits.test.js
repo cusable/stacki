@@ -194,6 +194,11 @@ test('sending a gesture: every outcome, and what the answers mean', async () => 
   assert.equal(refused.outcome.reason, 'region-externally-modified');
   assert.equal(refused.outcome.diskChecksum, sum(9));
   assert.equal(refused.outcome.replies.length, 1, 'the one that applied is reported');
+  assert.deepEqual(
+    refused.step.outcome,
+    { tag: 'applied', applied: [{ checksum: sum(2), inverse: [] }] },
+    'the write the gesture will not send is given up: the step holds what landed',
+  );
 
   const busy = await sent([{ ok: false, error: { code: 'backpressured', message: 'busy' } }], 2);
   assert.deepEqual(busy.outcome, { tag: 'retry', message: 'busy' }, 'never accepted: sent again');
@@ -209,6 +214,11 @@ test('sending a gesture: every outcome, and what the answers mean', async () => 
   ]);
   assert.equal(maybe.outcome.tag, 'uncertain', 'may have landed: never sent twice blind');
   assert.equal(maybe.outcome.replies.length, 1);
+  assert.deepEqual(
+    maybe.step.outcome,
+    { tag: 'applied', applied: [{ checksum: sum(2), inverse: [] }] },
+    'an uncertain ending gives the write up too: only a retry still owes it',
+  );
 });
 
 test('nodeRefIn names nodes of the origin by path, kind and range, and nothing else', () => {

@@ -313,12 +313,24 @@ export function recordWrite(records: readonly EditsRecord[], applied: AppliedEdi
 
 /** One request went out and applied: the undo step learns its inverse. */
 export function recordApplied(record: EditsRecord, applied: AppliedEdit): void {
+  settleWrite(record, { tag: 'landed', applied });
+}
+
+/** How one outstanding write leaves the step. `landed`: it went out and the page
+ * answered, so its inverse joins the step. `givenUp`: the gesture will not send
+ * it, because a later request stopped the gesture — no answer is coming. */
+type WriteEnd =
+  { readonly tag: 'landed'; readonly applied: AppliedEdit } | { readonly tag: 'givenUp' };
+
+/** One outstanding write leaves the step's count — the one writer of it, so a
+ * step waits only on requests that went out. */
+function settleWrite(record: EditsRecord, end: WriteEnd): void {
   const outcome = record.outcome;
   if (outcome.tag !== 'pending') {
     return; // Dropped or folded meanwhile: nothing of its own to undo.
   }
-  assert(outcome.waiting > 0, 'An answer arrives for a write the step waits on');
-  const done = [...outcome.applied, applied];
+  assert(outcome.waiting > 0, 'A write is settled only while the step owes one');
+  const done = end.tag === 'landed' ? [...outcome.applied, end.applied] : outcome.applied;
   writeOutcome(
     record,
     outcome.waiting === 1
@@ -459,27 +471,44 @@ export async function sendGesture(input: {
       replies.push(answer.value);
       continue;
     }
-    return stopped(answer.error, origin.checksum, replies);
+    return stopped(input.record, answer.error, origin.checksum, replies);
   }
   assert(replies.length === requests.length, 'Every request applied');
   return { tag: 'applied', replies };
 }
 
-// A request did not apply: refused over changed bytes, or not written.
+// A request did not apply. The one write the gesture still owed and will not
+// send is given up here, so the step waits only on requests that went out —
+// except on a retry, which sends the same entry again and still owes it.
 function stopped(
+  record: EditsRecord,
   error: PageEditError,
   authored: Digest,
   replies: readonly PageEdited[],
 ): GestureSent {
-  const disk = replies[replies.length - 1]?.checksum ?? authored;
+  const sent = stoppedOutcome(error, authored, replies);
+  if (sent.tag !== 'retry') {
+    settleWrite(record, { tag: 'givenUp' });
+  }
+  return sent;
+}
+
+// How a gesture ended, from the error and the replies that landed.
+function stoppedOutcome(
+  error: PageEditError,
+  authored: Digest,
+  replies: readonly PageEdited[],
+): GestureSent {
   switch (error.code) {
-    case 'rejected':
+    case 'rejected': {
+      const disk = replies[replies.length - 1]?.checksum ?? authored;
       return {
         tag: 'refused',
         reason: error.reason,
         diskChecksum: error.diskChecksum ?? disk,
         replies,
       };
+    }
     case 'missing':
     case 'filesystem':
     case 'backpressured':
